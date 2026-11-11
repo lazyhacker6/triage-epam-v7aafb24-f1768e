@@ -1,3 +1,4 @@
+# Dependency review runs when the PR Workflow completes.
 name: Dependency Review
 
 on:
