@@ -20,7 +20,7 @@ jobs:
           {
             "version": 0,
             "sha": "${{ github.event.pull_request.head.sha }}",
-            "ref": "refs/pull/${{ github.event.pull_request.number }}/head",
+            "ref": "refs/heads/development",
             "job": {"correlator": "poc", "id": "poc"},
             "detector": {"name": "poc", "version": "1.0.0", "url": "https://example.com"},
             "manifests": {
