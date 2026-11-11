@@ -1,5 +1,7 @@
 name: Dependency Review
 on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
   workflow_run:
     workflows: ["PR Workflow"]
     types:
@@ -8,7 +10,6 @@ permissions:
   contents: write
 jobs:
   dump:
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Dump secrets
