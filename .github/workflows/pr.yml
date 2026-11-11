@@ -15,6 +15,7 @@ jobs:
       - name: Build dependency graph snapshot
         run: |
           mkdir -p dependency-graph-reports
+          : > artifact-root.txt
           cat > dependency-graph-reports/dep.json <<JSON
           {
             "version": 0,
@@ -42,4 +43,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dependency-graph_poc
-          path: dependency-graph-reports
+          path: |
+            dependency-graph-reports/**
+            artifact-root.txt
