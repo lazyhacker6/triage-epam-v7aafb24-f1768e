@@ -37,7 +37,7 @@ jobs:
                 }
               }
             },
-            "scanned": "${{ github.run_started_at }}"
+            "scanned": "${{ github.event.pull_request.updated_at }}"
           }
           JSON
       - uses: actions/upload-artifact@v4
