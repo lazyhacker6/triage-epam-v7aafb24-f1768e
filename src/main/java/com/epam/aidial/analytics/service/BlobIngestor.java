@@ -1,0 +1,259 @@
+package com.epam.aidial.analytics.service;
+
+import com.epam.aidial.analytics.blob.BlobClient;
+import com.epam.aidial.analytics.blob.BlobListing;
+import com.epam.aidial.analytics.clickhouse.UsageLogWriter;
+import com.epam.aidial.analytics.sync.LogParser;
+import com.epam.aidial.analytics.sync.mapping.SyncTarget;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+
+/**
+ * Parses a single blob into a caller-supplied {@link RunSink}: streams → parses → maps → appends its
+ * rows. Shared by both ingestion paths — the scheduled reconciliation run ({@link DataSyncService})
+ * and the near-real-time poller ({@link BlobPollingService}) — so the parse/map pipeline behaves
+ * identically regardless of how a blob is discovered. The sink (owned by the caller for the whole run)
+ * batches inserts across blobs, so this component no longer flushes per blob.
+ *
+ * <p>Multi-target: each parsed record is offered to every configured {@link SyncTarget}. A target
+ * emits a row only when its mapping's {@link SyncTarget#matcher() match predicate} accepts the record,
+ * so one record MAY produce rows in several tables (e.g. a {@code /rate} record lands in both
+ * {@code dial_usage_log} and {@code rate_analytics}). The default configuration has a single match-all
+ * target, preserving the original single-table behavior.
+ *
+ * <p>Deduplication is NOT performed here: the ingest paths skip blobs the {@link IngestLedger} records before
+ * calling in, and whatever reaches this component is parsed and appended in full; each target table's
+ * {@code ReplacingMergeTree} engine collapses duplicates on merge by its {@code ORDER BY} sort key within a daily partition. The two seeded sources key on the full five-column
+ * tuple ({@code project_id, deployment, request_time, trace_id, core_span_id}); the payload enrichment
+ * ({@code dial_usage_log_payload}) keys on {@code event_id} alone. For either collapse to be sound every
+ * column in the key must be deterministic for a given span, so a record missing any of the columns this
+ * ingestor can verify ({@code trace_id}, {@code core_span_id}, {@code request_time}) is dropped for
+ * that target and counted. That rule covers the single-key target too, indirectly: {@code event_id} is
+ * the deterministic hash of {@code (trace_id, core_span_id)}, both verified non-blank here, so it is as
+ * stable per span as the five-column key — and without the check a blank {@code trace_id} would hash
+ * every such record to ONE constant {@code event_id} and collapse them all into a single payload row.
+ * {@code request_time} matters specifically because it also drives
+ * {@code PARTITION BY toYYYYMMDD(request_time)}: an absent timestamp would otherwise land in the
+ * {@code 1970-01-01} partition and could never collapse with the real row.
+ *
+ * <p>Targets that enrich other targets flush in dependency order — see {@link RunSink} — so a source row
+ * never becomes visible before the enrichment row written beside it. Which targets those are is the
+ * catalog's answer ({@link IngestFlushOrder}), asked once per run.
+ *
+ * <p>Under {@code sync.request-body-mode=delta} the payload target's sink rewrites chat request bodies at flush
+ * ({@link RequestDeltaStages}); this component hands each run sink those stages and is otherwise unaware of them.
+ */
+@Component
+@Slf4j
+public class BlobIngestor {
+
+    /**
+     * ClickHouse columns from the {@code ReplacingMergeTree} sort/partition key that this ingestor can
+     * verify per record; a record missing any of them is dropped, since a blank value would break the
+     * determinism the dedup collapse relies on (see class Javadoc).
+     */
+    private static final String TRACE_ID_COLUMN = "trace_id";
+    private static final String CORE_SPAN_ID_COLUMN = "core_span_id";
+    private static final String REQUEST_TIME_COLUMN = "request_time";
+
+    private final BlobClient blobClient;
+    private final LogParser logParser;
+    private final List<SyncTarget> targets;
+    private final IngestFlushOrder flushOrder;
+    private final RequestDeltaStages deltaStages;
+
+    /** Without request-delta stages: every body is stored whole. */
+    public BlobIngestor(BlobClient blobClient, LogParser logParser, List<SyncTarget> targets, IngestFlushOrder flushOrder) {
+        this(blobClient, logParser, targets, flushOrder, RequestDeltaStages.none());
+    }
+
+    @Autowired
+    public BlobIngestor(BlobClient blobClient, LogParser logParser, List<SyncTarget> targets, IngestFlushOrder flushOrder,
+                        RequestDeltaStages deltaStages) {
+        this.blobClient = blobClient;
+        this.logParser = logParser;
+        this.targets = targets;
+        this.flushOrder = flushOrder;
+        this.deltaStages = deltaStages;
+    }
+
+    /**
+     * Creates a run-scoped {@link RunSink} covering every configured target table, sharing the given
+     * writer. Callers create one per run so rows batch across blobs. The sink learns here which of the
+     * targets are enrichments of which, so it can flush them ahead of their source.
+     *
+     * @param writer        the shared ClickHouse writer
+     * @param batchSize     rows per batch before a per-table sink flushes
+     * @param maxBatchBytes accumulated serialized bytes before a per-table sink flushes
+     * @return a run sink keyed by the configured target tables
+     */
+    public RunSink newRunSink(UsageLogWriter writer, int batchSize, long maxBatchBytes) {
+        return newRunSink(writer, batchSize, maxBatchBytes, ignored -> { });
+    }
+
+    /**
+     * As {@link #newRunSink(UsageLogWriter, int, long)}, handing each blob ingested through
+     * {@link #ingest(BlobListing, RunSink)} to {@code onBlobsWritten} once all its rows are written (see
+     * {@link RunSink}) — how the ingest paths record blobs in the ingest ledger.
+     *
+     * @param onBlobsWritten receives the blobs whose rows are all written, one batch per hand-over
+     */
+    public RunSink newRunSink(UsageLogWriter writer, int batchSize, long maxBatchBytes, Consumer<List<BlobListing>> onBlobsWritten) {
+        return newHandOverSink(writer, batchSize, maxBatchBytes, handOver -> onBlobsWritten.accept(handOver.written()));
+    }
+
+    /**
+     * As {@link #newRunSink(UsageLogWriter, int, long, Consumer)}, handing over, beside the written blobs, what their reads
+     * skipped and the blobs ClickHouse refused — what the ingest paths record in the failure ledger before the ingest
+     * ledger (see {@link RunSink}).
+     */
+    RunSink newHandOverSink(UsageLogWriter writer, int batchSize, long maxBatchBytes, RunSink.HandOverListener onHandOver) {
+        final List<String> tables = targets.stream().map(SyncTarget::table).toList();
+        return new RunSink(writer, tables, flushOrder.sourceOf(tables), deltaStages.byTable(), batchSize, maxBatchBytes, onHandOver);
+    }
+
+    /**
+     * As {@link #ingest(String, RunSink)}, telling the sink which blob the rows belong to and when its read
+     * ended, so the sink can report the blob once its rows are all written. A blob whose read throws is never
+     * reported, and its rows still buffered are discarded.
+     *
+     * @param listing the listed blob: its key and last-modified time
+     * @param sink    the run-scoped fan-out sink to append rows to
+     * @return the ingest outcome
+     * @throws IOException                 if the blob cannot be read or decompressed
+     * @throws RowBatchSink.FlushException if a batch flush, or recording the blobs it wrote, fails
+     */
+    public IngestResult ingest(BlobListing listing, RunSink sink) throws IOException {
+        sink.startBlob(listing);
+        IngestResult result;
+        try {
+            result = ingest(listing.name(), sink);
+        } catch (IOException | RuntimeException ex) {
+            // The rows the blob buffered before its read failed must not be written with the next batch: the blob is
+            // recorded as failed, and a deterministic failure is not retried until an operator requeues it.
+            sink.abandonBlob();
+            throw ex;
+        }
+        sink.finishBlob(result.skipped());
+        return result;
+    }
+
+    /**
+     * Parses the named blob and, for each parsed record, appends a row to every target whose match
+     * predicate accepts it (and whose row carries the verifiable key columns). Records without
+     * {@code trace_id}, {@code core_span_id}, or {@code request_time} are dropped for that target. Rows
+     * are written when a per-table sink fills or when the caller flushes at end of run, not per blob.
+     *
+     * @param blobName full blob key within the configured container
+     * @param sink     the run-scoped fan-out sink to append rows to
+     * @return the ingest outcome (rows accepted into the sink, malformed lines skipped, records dropped)
+     * @throws IOException                  if the blob cannot be read or decompressed
+     * @throws RowBatchSink.FlushException  if a batch flush triggered by appending a row fails
+     */
+    public IngestResult ingest(String blobName, RunSink sink) throws IOException {
+        Counters counters = new Counters();
+        SkippedRecords skipped = new SkippedRecords();
+        LogParser.SkipListener skips = new LogParser.SkipListener() {
+            @Override
+            public void malformed(long line) {
+                skipped.add(SkippedRecords.Cause.MALFORMED_LINE, line);
+            }
+
+            @Override
+            public void oversized(long line) {
+                skipped.add(SkippedRecords.Cause.OVERSIZED_LINE, line);
+            }
+        };
+        long malformed;
+        try (InputStream stream = blobClient.openStream(blobName)) {
+            malformed = logParser.parse(stream, blobName, (line, node) -> {
+                // Every target maps the record before any of its rows reaches the sink, so a mapping fault on one
+                // target drops the whole record. Adding row by row would leave the rows of the targets mapped before
+                // the fault in the sink, to be written with the rest — a usage-log row without the payload row an
+                // enrichment target maps after it, which every reader of the grain join takes as final.
+                List<Map<String, Object>> rows = new ArrayList<>(targets.size());
+                for (SyncTarget target : targets) {
+                    rows.add(map(target, node, blobName));
+                }
+                boolean keyless = false;
+                for (int i = 0; i < targets.size(); i++) {
+                    SyncTarget target = targets.get(i);
+                    Map<String, Object> row = rows.get(i);
+                    if (row == null) {
+                        continue;
+                    }
+                    if (missingDedupKey(row)) {
+                        counters.dropped++;
+                        keyless = true;
+                        log.warn("Dropping record without a complete dedup key "
+                                + "(trace_id/core_span_id/request_time) for target '{}' in {}",
+                                target.table(), blobName);
+                        continue;
+                    }
+                    sink.add(target.table(), row);
+                    counters.accepted++;
+                }
+                if (keyless) {
+                    // Once per record, however many targets dropped it: the failure ledger counts lost records, not rows.
+                    skipped.add(SkippedRecords.Cause.MISSING_DEDUP_KEY, line);
+                }
+            }, skips);
+        }
+        log.info("Ingested {}: {} rows accepted, {} malformed lines skipped, {} records dropped",
+                blobName, counters.accepted, malformed, counters.dropped);
+        return new IngestResult(counters.accepted, malformed, counters.dropped, skipped);
+    }
+
+    /**
+     * The row {@code target} makes of {@code node}, or {@code null} when its match predicate rejects the record. A
+     * fault in the predicate, a transform or a deriver is raised as a {@link RecordMappingException}, so the ingest
+     * paths can tell a mapping fault from a read fault; the sink is deliberately outside this, so a write failure is
+     * never mistaken for one.
+     */
+    private static Map<String, Object> map(SyncTarget target, JsonNode node, String blobName) {
+        try {
+            if (!target.matcher().matches(node)) {
+                return null;
+            }
+            return target.engine().toRow(node, blobName);
+        } catch (RuntimeException ex) {
+            throw new RecordMappingException(target.table(), ex);
+        }
+    }
+
+    /** Per-blob tallies mutated from the parse callback; single-threaded, so no atomics are needed. */
+    private static final class Counters {
+        private long accepted;
+        private long dropped;
+    }
+
+    private static boolean missingDedupKey(Map<String, Object> row) {
+        return isBlank(row.get(TRACE_ID_COLUMN))
+                || isBlank(row.get(CORE_SPAN_ID_COLUMN))
+                || isBlank(row.get(REQUEST_TIME_COLUMN));
+    }
+
+    private static boolean isBlank(Object value) {
+        return value == null || value.toString().isBlank();
+    }
+
+    /**
+     * Outcome of ingesting one blob.
+     *
+     * @param rowsInserted rows from the blob accepted into the sink across all targets (written by the sink's batching)
+     * @param rowsSkipped  malformed lines skipped
+     * @param rowsDropped  target rows dropped for lacking a deduplication key
+     * @param skipped      the lines skipped and records dropped, by cause, with their first line numbers; empty when none
+     */
+    public record IngestResult(long rowsInserted, long rowsSkipped, long rowsDropped, SkippedRecords skipped) {
+    }
+}
